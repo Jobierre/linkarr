@@ -45,7 +45,34 @@ load_config() {
     REPORT_DIR="${REPORT_DIR:-${PROJECT_DIR}/reports}"
     VERBOSE="${VERBOSE:-false}"
 
+    # Docker path mappings (optional)
+    DOCKER_PATH_MAP_MEDIA="${DOCKER_PATH_MAP_MEDIA:-}"
+    DOCKER_PATH_MAP_DOWNLOADS="${DOCKER_PATH_MAP_DOWNLOADS:-}"
+
     export REPORT_DIR VERBOSE
+}
+
+# Translate Docker container path to host path
+# Usage: translate_path <container_path>
+translate_path() {
+    local path="$1"
+    local result="$path"
+
+    # Apply media path mapping
+    if [[ -n "${DOCKER_PATH_MAP_MEDIA:-}" ]]; then
+        local container_path="${DOCKER_PATH_MAP_MEDIA%%:*}"
+        local host_path="${DOCKER_PATH_MAP_MEDIA#*:}"
+        result="${result/#$container_path/$host_path}"
+    fi
+
+    # Apply downloads path mapping
+    if [[ -n "${DOCKER_PATH_MAP_DOWNLOADS:-}" ]]; then
+        local container_path="${DOCKER_PATH_MAP_DOWNLOADS%%:*}"
+        local host_path="${DOCKER_PATH_MAP_DOWNLOADS#*:}"
+        result="${result/#$container_path/$host_path}"
+    fi
+
+    echo "$result"
 }
 
 # Check if a file has hard links
@@ -151,11 +178,20 @@ check_movies_api() {
 
     # Process each movie
     while IFS=$'\t' read -r movie_id title file_path; do
-        ((count++))
+        [[ -z "$file_path" ]] && continue
+        ((count++)) || true
         print_progress "$count" "$total" "movies"
         inc_movies
 
-        check_media_file "FILM" "$file_path" "$downloads_dir" ""
+        # Translate Docker path to host path
+        local host_path
+        host_path=$(translate_path "$file_path")
+
+        if [[ "${VERBOSE:-false}" == "true" && "$host_path" != "$file_path" ]]; then
+            print_info "Path translated: $file_path -> $host_path"
+        fi
+
+        check_media_file "FILM" "$host_path" "$downloads_dir" ""
     done < <(echo "$movies_json" | parse_radarr_movies)
 
     clear_progress
@@ -192,15 +228,19 @@ check_tv_api() {
 
         local episode_count
         episode_count=$(echo "$episode_files" | jq 'length')
-        ((total_episodes += episode_count))
+        ((total_episodes += episode_count)) || true
 
         # Process each episode file
         while IFS=$'\t' read -r ep_path; do
             [[ -z "$ep_path" ]] && continue
-            ((count++))
+            ((count++)) || true
             inc_tv
 
-            check_media_file "SÉRIE" "$ep_path" "$downloads_dir" ""
+            # Translate Docker path to host path
+            local host_path
+            host_path=$(translate_path "$ep_path")
+
+            check_media_file "SÉRIE" "$host_path" "$downloads_dir" ""
         done < <(echo "$episode_files" | jq -r '.[].path // empty')
 
     done < <(echo "$series_json" | jq -r '.[] | [.id, .title] | @tsv')
