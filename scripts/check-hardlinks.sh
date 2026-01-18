@@ -1,0 +1,347 @@
+#!/bin/bash
+# check-hardlinks.sh - Main verification script for Sonarr/Radarr hard links
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Source helper scripts
+source "${SCRIPT_DIR}/api-helper.sh"
+source "${SCRIPT_DIR}/report.sh"
+
+# Load configuration
+load_config() {
+    local config_file="${PROJECT_DIR}/config.env"
+
+    if [[ -f "$config_file" ]]; then
+        # shellcheck source=/dev/null
+        source "$config_file"
+    else
+        print_error "Configuration file not found: $config_file"
+        print_info "Copy config.env.example to config.env and configure it"
+        exit 1
+    fi
+
+    # Validate required variables
+    local missing=()
+    [[ -z "${SONARR_URL:-}" ]] && missing+=("SONARR_URL")
+    [[ -z "${SONARR_API_KEY:-}" ]] && missing+=("SONARR_API_KEY")
+    [[ -z "${RADARR_URL:-}" ]] && missing+=("RADARR_URL")
+    [[ -z "${RADARR_API_KEY:-}" ]] && missing+=("RADARR_API_KEY")
+    [[ -z "${DOWNLOADS_PATH:-}" ]] && missing+=("DOWNLOADS_PATH")
+    [[ -z "${MEDIA_PATH:-}" ]] && missing+=("MEDIA_PATH")
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        print_error "Missing required configuration: ${missing[*]}"
+        exit 1
+    fi
+
+    # Set defaults for optional variables
+    MOVIES_DOWNLOAD_SUBDIR="${MOVIES_DOWNLOAD_SUBDIR:-movies}"
+    TV_DOWNLOAD_SUBDIR="${TV_DOWNLOAD_SUBDIR:-tv}"
+    MOVIES_MEDIA_SUBDIR="${MOVIES_MEDIA_SUBDIR:-movies}"
+    TV_MEDIA_SUBDIR="${TV_MEDIA_SUBDIR:-tv}"
+    REPORT_DIR="${REPORT_DIR:-${PROJECT_DIR}/reports}"
+    VERBOSE="${VERBOSE:-false}"
+
+    export REPORT_DIR VERBOSE
+}
+
+# Check if a file has hard links
+# Returns 0 if file has hard links (links > 1), 1 otherwise
+# Usage: has_hardlinks <file_path>
+has_hardlinks() {
+    local file_path="$1"
+
+    if [[ ! -f "$file_path" ]]; then
+        return 1
+    fi
+
+    local links
+    links=$(stat -c '%h' "$file_path" 2>/dev/null || stat -f '%l' "$file_path" 2>/dev/null)
+
+    [[ "$links" -gt 1 ]]
+}
+
+# Get inode of a file
+# Usage: get_inode <file_path>
+get_inode() {
+    local file_path="$1"
+
+    stat -c '%i' "$file_path" 2>/dev/null || stat -f '%i' "$file_path" 2>/dev/null
+}
+
+# Get link count of a file
+# Usage: get_link_count <file_path>
+get_link_count() {
+    local file_path="$1"
+
+    stat -c '%h' "$file_path" 2>/dev/null || stat -f '%l' "$file_path" 2>/dev/null
+}
+
+# Find files with same inode in a directory
+# Usage: find_hardlinks_in_dir <inode> <search_dir>
+find_hardlinks_in_dir() {
+    local inode="$1"
+    local search_dir="$2"
+
+    if [[ ! -d "$search_dir" ]]; then
+        return 1
+    fi
+
+    find "$search_dir" -inum "$inode" -type f 2>/dev/null
+}
+
+# Check a single media file
+# Usage: check_media_file <type> <file_path> <downloads_dir> [source_hint]
+check_media_file() {
+    local type="$1"
+    local file_path="$2"
+    local downloads_dir="$3"
+    local source_hint="${4:-}"
+
+    if [[ ! -f "$file_path" ]]; then
+        print_warning "File not found: $file_path"
+        return 0
+    fi
+
+    local inode links
+    inode=$(get_inode "$file_path")
+    links=$(get_link_count "$file_path")
+
+    if [[ "$links" -gt 1 ]]; then
+        # Has hard links - check if one exists in downloads
+        local found_in_downloads
+        found_in_downloads=$(find_hardlinks_in_dir "$inode" "$downloads_dir" | head -1)
+
+        if [[ -n "$found_in_downloads" ]]; then
+            print_ok "$file_path"
+            return 0
+        fi
+    fi
+
+    # No hard link found in downloads directory
+    log_problem "$type" "$file_path" "$inode" "$links" "$source_hint"
+
+    # Try to suggest a fix
+    if [[ -n "$source_hint" && -f "$source_hint" ]]; then
+        log_suggestion "$source_hint" "$file_path"
+    else
+        log_suggestion_comment "Source unknown for: $file_path"
+    fi
+}
+
+# Check movies via Radarr API
+check_movies_api() {
+    print_info "Fetching movies from Radarr..."
+
+    local movies_json
+    if ! movies_json=$(get_radarr_movies 2>&1); then
+        print_error "Failed to fetch movies from Radarr: $movies_json"
+        return 1
+    fi
+
+    local total
+    total=$(echo "$movies_json" | jq '[.[] | select(.hasFile == true)] | length')
+    print_info "Found $total movies with files"
+
+    local downloads_dir="${DOWNLOADS_PATH}/${MOVIES_DOWNLOAD_SUBDIR}"
+    local count=0
+
+    # Process each movie
+    while IFS=$'\t' read -r movie_id title file_path; do
+        ((count++))
+        print_progress "$count" "$total" "movies"
+        inc_movies
+
+        check_media_file "FILM" "$file_path" "$downloads_dir" ""
+    done < <(echo "$movies_json" | parse_radarr_movies)
+
+    clear_progress
+    print_info "Checked $count movies"
+}
+
+# Check TV shows via Sonarr API
+check_tv_api() {
+    print_info "Fetching series from Sonarr..."
+
+    local series_json
+    if ! series_json=$(get_sonarr_series 2>&1); then
+        print_error "Failed to fetch series from Sonarr: $series_json"
+        return 1
+    fi
+
+    local series_count
+    series_count=$(echo "$series_json" | jq 'length')
+    print_info "Found $series_count series"
+
+    local downloads_dir="${DOWNLOADS_PATH}/${TV_DOWNLOAD_SUBDIR}"
+    local total_episodes=0
+    local count=0
+
+    # Process each series
+    while IFS=$'\t' read -r series_id series_title; do
+        print_info "Checking: $series_title"
+
+        local episode_files
+        if ! episode_files=$(get_sonarr_episode_files "$series_id" 2>&1); then
+            print_warning "Failed to fetch episodes for $series_title"
+            continue
+        fi
+
+        local episode_count
+        episode_count=$(echo "$episode_files" | jq 'length')
+        ((total_episodes += episode_count))
+
+        # Process each episode file
+        while IFS=$'\t' read -r ep_path; do
+            [[ -z "$ep_path" ]] && continue
+            ((count++))
+            inc_tv
+
+            check_media_file "SÉRIE" "$ep_path" "$downloads_dir" ""
+        done < <(echo "$episode_files" | jq -r '.[].path // empty')
+
+    done < <(echo "$series_json" | jq -r '.[] | [.id, .title] | @tsv')
+
+    print_info "Checked $count episodes across $series_count series"
+}
+
+# Fallback: Check movies by scanning filesystem
+check_movies_filesystem() {
+    local media_dir="${MEDIA_PATH}/${MOVIES_MEDIA_SUBDIR}"
+    local downloads_dir="${DOWNLOADS_PATH}/${MOVIES_DOWNLOAD_SUBDIR}"
+
+    if [[ ! -d "$media_dir" ]]; then
+        print_error "Movies media directory not found: $media_dir"
+        return 1
+    fi
+
+    print_info "Scanning movies directory: $media_dir"
+
+    local count=0
+    while IFS= read -r -d '' file_path; do
+        ((count++))
+        inc_movies
+        check_media_file "FILM" "$file_path" "$downloads_dir" ""
+
+        if ((count % 10 == 0)); then
+            print_progress "$count" "?" "movies"
+        fi
+    done < <(find "$media_dir" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.avi" -o -name "*.m4v" \) -print0)
+
+    clear_progress
+    print_info "Checked $count movie files"
+}
+
+# Fallback: Check TV shows by scanning filesystem
+check_tv_filesystem() {
+    local media_dir="${MEDIA_PATH}/${TV_MEDIA_SUBDIR}"
+    local downloads_dir="${DOWNLOADS_PATH}/${TV_DOWNLOAD_SUBDIR}"
+
+    if [[ ! -d "$media_dir" ]]; then
+        print_error "TV media directory not found: $media_dir"
+        return 1
+    fi
+
+    print_info "Scanning TV directory: $media_dir"
+
+    local count=0
+    while IFS= read -r -d '' file_path; do
+        ((count++))
+        inc_tv
+        check_media_file "SÉRIE" "$file_path" "$downloads_dir" ""
+
+        if ((count % 10 == 0)); then
+            print_progress "$count" "?" "episodes"
+        fi
+    done < <(find "$media_dir" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.avi" -o -name "*.m4v" \) -print0)
+
+    clear_progress
+    print_info "Checked $count TV files"
+}
+
+# Main check function for movies
+check_movies() {
+    local use_api="${1:-true}"
+
+    if [[ "$use_api" == "true" ]]; then
+        if test_api_connection radarr >/dev/null 2>&1; then
+            check_movies_api
+        else
+            print_warning "Radarr API not available, falling back to filesystem scan"
+            check_movies_filesystem
+        fi
+    else
+        check_movies_filesystem
+    fi
+}
+
+# Main check function for TV
+check_tv() {
+    local use_api="${1:-true}"
+
+    if [[ "$use_api" == "true" ]]; then
+        if test_api_connection sonarr >/dev/null 2>&1; then
+            check_tv_api
+        else
+            print_warning "Sonarr API not available, falling back to filesystem scan"
+            check_tv_filesystem
+        fi
+    else
+        check_tv_filesystem
+    fi
+}
+
+# Main entry point
+main() {
+    local mode="${1:-all}"
+
+    check_dependencies
+    load_config
+    init_report
+
+    print_header "Vérification des Hard Links"
+    print_info "Downloads: ${DOWNLOADS_PATH}"
+    print_info "Media: ${MEDIA_PATH}"
+
+    case "$mode" in
+        all)
+            check_movies
+            check_tv
+            ;;
+        movies)
+            check_movies
+            ;;
+        tv)
+            check_tv
+            ;;
+        movies-fs)
+            check_movies false
+            ;;
+        tv-fs)
+            check_tv false
+            ;;
+        test-api)
+            echo "Testing API connections..."
+            test_api_connection radarr || true
+            test_api_connection sonarr || true
+            exit 0
+            ;;
+        *)
+            echo "Usage: $0 [all|movies|tv|movies-fs|tv-fs|test-api]"
+            exit 1
+            ;;
+    esac
+
+    generate_summary
+
+    # Exit with error code if problems found
+    [[ $PROBLEMS_FOUND -eq 0 ]]
+}
+
+# Run main if script is executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

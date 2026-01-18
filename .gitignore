@@ -1,0 +1,26 @@
+# Configuration file with sensitive paths
+config.env
+
+# Logs
+*.log
+
+# Reports
+reports/
+*.report.txt
+*.report.md
+
+# Backups
+backups/
+*.backup
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+.grepai/
