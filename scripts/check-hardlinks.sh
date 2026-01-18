@@ -46,7 +46,8 @@ load_config() {
     VERBOSE="${VERBOSE:-false}"
 
     # Docker path mappings (optional)
-    DOCKER_PATH_MAP_MEDIA="${DOCKER_PATH_MAP_MEDIA:-}"
+    DOCKER_PATH_MAP_MOVIES="${DOCKER_PATH_MAP_MOVIES:-}"
+    DOCKER_PATH_MAP_TV="${DOCKER_PATH_MAP_TV:-}"
     DOCKER_PATH_MAP_DOWNLOADS="${DOCKER_PATH_MAP_DOWNLOADS:-}"
 
     export REPORT_DIR VERBOSE
@@ -54,22 +55,42 @@ load_config() {
 
 # Translate Docker container path to host path
 # Usage: translate_path <container_path>
+# Applies all configured path mappings in order (most specific first)
 translate_path() {
     local path="$1"
     local result="$path"
 
-    # Apply media path mapping
-    if [[ -n "${DOCKER_PATH_MAP_MEDIA:-}" ]]; then
-        local container_path="${DOCKER_PATH_MAP_MEDIA%%:*}"
-        local host_path="${DOCKER_PATH_MAP_MEDIA#*:}"
-        result="${result/#$container_path/$host_path}"
+    # Apply movies path mapping (most specific, check first)
+    if [[ -n "${DOCKER_PATH_MAP_MOVIES:-}" ]]; then
+        local container_path="${DOCKER_PATH_MAP_MOVIES%%:*}"
+        local host_path="${DOCKER_PATH_MAP_MOVIES#*:}"
+        if [[ "$result" == "$container_path"* ]]; then
+            result="${result/#$container_path/$host_path}"
+            echo "$result"
+            return
+        fi
+    fi
+
+    # Apply TV path mapping
+    if [[ -n "${DOCKER_PATH_MAP_TV:-}" ]]; then
+        local container_path="${DOCKER_PATH_MAP_TV%%:*}"
+        local host_path="${DOCKER_PATH_MAP_TV#*:}"
+        if [[ "$result" == "$container_path"* ]]; then
+            result="${result/#$container_path/$host_path}"
+            echo "$result"
+            return
+        fi
     fi
 
     # Apply downloads path mapping
     if [[ -n "${DOCKER_PATH_MAP_DOWNLOADS:-}" ]]; then
         local container_path="${DOCKER_PATH_MAP_DOWNLOADS%%:*}"
         local host_path="${DOCKER_PATH_MAP_DOWNLOADS#*:}"
-        result="${result/#$container_path/$host_path}"
+        if [[ "$result" == "$container_path"* ]]; then
+            result="${result/#$container_path/$host_path}"
+            echo "$result"
+            return
+        fi
     fi
 
     echo "$result"
