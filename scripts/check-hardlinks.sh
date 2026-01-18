@@ -96,7 +96,7 @@ has_hardlinks() {
 get_inode() {
     local file_path="$1"
 
-    stat -c '%i' "$file_path" 2>/dev/null || stat -f '%i' "$file_path" 2>/dev/null
+    stat -c '%i' "$file_path" 2>/dev/null || stat -f '%i' "$file_path" 2>/dev/null || echo "0"
 }
 
 # Get link count of a file
@@ -104,7 +104,7 @@ get_inode() {
 get_link_count() {
     local file_path="$1"
 
-    stat -c '%h' "$file_path" 2>/dev/null || stat -f '%l' "$file_path" 2>/dev/null
+    stat -c '%h' "$file_path" 2>/dev/null || stat -f '%l' "$file_path" 2>/dev/null || echo "0"
 }
 
 # Find files with same inode in a directory
@@ -114,10 +114,10 @@ find_hardlinks_in_dir() {
     local search_dir="$2"
 
     if [[ ! -d "$search_dir" ]]; then
-        return 1
+        return 0
     fi
 
-    find "$search_dir" -inum "$inode" -type f 2>/dev/null
+    find "$search_dir" -inum "$inode" -type f 2>/dev/null || true
 }
 
 # Check a single media file
@@ -164,8 +164,8 @@ check_movies_api() {
     print_info "Fetching movies from Radarr..."
 
     local movies_json
-    if ! movies_json=$(get_radarr_movies 2>&1); then
-        print_error "Failed to fetch movies from Radarr: $movies_json"
+    if ! movies_json=$(get_radarr_movies); then
+        print_error "Failed to fetch movies from Radarr"
         return 1
     fi
 
@@ -203,8 +203,8 @@ check_tv_api() {
     print_info "Fetching series from Sonarr..."
 
     local series_json
-    if ! series_json=$(get_sonarr_series 2>&1); then
-        print_error "Failed to fetch series from Sonarr: $series_json"
+    if ! series_json=$(get_sonarr_series); then
+        print_error "Failed to fetch series from Sonarr"
         return 1
     fi
 
@@ -221,7 +221,7 @@ check_tv_api() {
         print_info "Checking: $series_title"
 
         local episode_files
-        if ! episode_files=$(get_sonarr_episode_files "$series_id" 2>&1); then
+        if ! episode_files=$(get_sonarr_episode_files "$series_id"); then
             print_warning "Failed to fetch episodes for $series_title"
             continue
         fi
