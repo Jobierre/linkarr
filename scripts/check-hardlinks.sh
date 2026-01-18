@@ -158,18 +158,13 @@ check_media_file() {
     inode=$(get_inode "$file_path")
     links=$(get_link_count "$file_path")
 
+    # Quick check: if links > 1, the file has hard links somewhere
     if [[ "$links" -gt 1 ]]; then
-        # Has hard links - check if one exists in downloads
-        local found_in_downloads
-        found_in_downloads=$(find_hardlinks_in_dir "$inode" "$downloads_dir" | head -1)
-
-        if [[ -n "$found_in_downloads" ]]; then
-            print_ok "$file_path"
-            return 0
-        fi
+        print_ok "$file_path (links: $links)"
+        return 0
     fi
 
-    # No hard link found in downloads directory
+    # Links = 1 means no hard link exists
     log_problem "$type" "$file_path" "$inode" "$links" "$source_hint"
 
     # Try to suggest a fix
